@@ -1,0 +1,323 @@
+---
+title: "Data Assemble"
+author: "Zehui Yin"
+format: html
+---
+
+```{r load package}
+#| message: false
+library(tidyverse)
+library(sf)
+library(cancensus)
+library(mapview)
+Sys.setenv(JAVA_HOME="C:\\Program Files\\Java\\jdk-11.0.17")
+library(r5r)
+```
+
+# Read data
+
+```{r}
+boundary <- st_read("./Data/Police Boundaries Data - 4326.gpkg")
+#mapview(boundary)
+
+station <- st_read("./Data/Police Facility Locations - 4326.gpkg")
+#mapview(station)
+
+theft <- st_read("./Data/bicycle-thefts - 4326.gpkg")
+theft <- theft |>
+  filter(OCC_YEAR >= 2014)
+#mapview(theft)
+```
+
+```{r}
+options(cancensus.api_key = "your_api_key_here")
+options(cancensus.cache_path = "./Census")
+
+# Returns data and geography as an sf-class data frame
+census_data <- get_census(
+  # 2021 census
+  dataset='CA21',
+  # CSD Toronto
+  regions=list(CSD="3520005"),
+  # Census variables
+  vectors=c(
+    # age and population density
+    "v_CA21_6","v_CA21_11","v_CA21_71","v_CA21_89",
+    # gender
+    "v_CA21_10","v_CA21_8",
+    # population count
+    "v_CA21_1",
+    # Indigenous identity (Total)
+    "v_CA21_4204",
+    # Total - Indigenous identity for the population in private households (Total)
+    "v_CA21_4201",
+    # Not a visible minority (Total)
+    "v_CA21_4914",
+    # Total - Visible minority for the population in private households (Total)
+    "v_CA21_4872",
+    # Chinese (Total)
+    "v_CA21_4881",
+    # Black (Total)
+    "v_CA21_4884",
+    # Latin American (Total)
+    "v_CA21_4893",
+    # Under $5,000; $5,000 to $9,999; $10,000 to $14,999; $15,000 to $19,999 ;
+    # $20,000 to $24,999; $25,000 to $29,999; $30,000 to $34,999; $35,000 to $39,999
+    "v_CA21_924","v_CA21_925","v_CA21_926","v_CA21_927","v_CA21_928","v_CA21_929","v_CA21_930","v_CA21_931",
+    # $100,000 and over
+    # Household total income groups in 2020 for private households
+    "v_CA21_939","v_CA21_923"
+  ),
+  # at Census Tract level
+  level='CT',
+  geo_format = 'sf', quiet = TRUE)
+
+#mapview(census_data)
+```
+
+Remove all bike theft records without geographical location
+
+```{r}
+theft <- theft[st_intersects(theft,
+              st_union(census_data),
+              sparse = F),]
+```
+
+# Assemble the dataset
+
+## Merge census data and police boundary
+
+```{r}
+census_data <- st_join(census_data,
+                       boundary,
+              join = st_intersects,
+              largest = T)
+```
+
+## Merge census data and police station location data
+
+```{r eval=F}
+# euclidean distance
+#census_data$distance_m_to_nearest_station <- st_distance(census_data |> 
+#                                                           st_centroid(),
+#                                                station) |> as.data.frame() |>
+#  rowwise() |>
+#  mutate(min = min(pick(V1:V26))) |>
+#  pluck("min")
+```
+
+```{r}
+options(java.parameters = "-Xmx12G")
+r5r_core <- setup_r5(data_path = "./Network", verbose = F)
+```
+
+```{r}
+census_data$id <- 1:nrow(census_data)
+station$id <- 1:nrow(station)
+
+ttm <- travel_time_matrix(
+  r5r_core = r5r_core,
+  origins = st_centroid(census_data),
+  destinations = st_centroid(station),
+  mode = "WALK",
+  walk_speed = 1,
+  max_trip_duration = 99999999
+)
+
+stop_r5(r5r_core)
+```
+
+```{r}
+# CT 2 is the island (no network distance)
+ttm$travel_time_p50 <- ttm$travel_time_p50/60*1000 # network distance in m
+ttm |> pivot_wider(names_from = to_id, values_from = travel_time_p50) -> ttm
+
+# use euclidean distance for CT 2
+ttm<- rbind(ttm, c(2, 
+                   st_distance(st_centroid(
+                     census_data[which(census_data$id == 2),]),
+                                st_centroid(station))))
+
+ttm |>
+  rowwise() |>
+  mutate(distance_m_to_nearest_station = min(pick(-from_id))) |>
+  select(from_id, distance_m_to_nearest_station) -> min_dist
+
+census_data <- merge(
+  x = census_data,
+  y = min_dist,
+  by.x = "id",
+  by.y = "from_id"
+)
+```
+
+## Merge theft to census data
+
+**Variables**:
+
+- Percentage of age below 19
+
+```{r}
+census_data$PCT_ageblw19 <- (census_data$`v_CA21_11: 0 to 14 years`+census_data$`v_CA21_71: 15 to 19 years`)/census_data$`v_CA21_8: Total - Age`*100
+#mapview(census_data, zcol = "PCT_ageblw19")
+```
+
+- Percentage of age 20 - 24
+
+```{r}
+census_data$PCT_age20to24 <- census_data$`v_CA21_89: 20 to 24 years`/census_data$`v_CA21_8: Total - Age`*100
+#mapview(census_data, zcol = "PCT_age20to24")
+```
+
+- Percentage of female
+
+```{r}
+census_data$PCT_female <- census_data$`v_CA21_10: Total - Age`/census_data$`v_CA21_8: Total - Age`*100
+#mapview(census_data, zcol = "PCT_female")
+```
+
+- Percentage of rest of residents based on gender
+
+```{r}
+census_data$PCT_rest_gender <- 100-census_data$PCT_female
+#mapview(census_data, zcol = "PCT_rest_gender")
+```
+
+- Percentage of indigenous people
+
+```{r}
+census_data$PCT_indigenous <- census_data$`v_CA21_4204: Indigenous identity (39)`/census_data$`v_CA21_4201: Total - Indigenous identity for the population in private households`*100
+#mapview(census_data, zcol = "PCT_indigenous")
+```
+
+- Percentage of non-indigenous people
+
+```{r}
+census_data$PCT_non_indigenous <- 100 - census_data$PCT_indigenous
+#mapview(census_data, zcol = "PCT_non_indigenous")
+```
+
+- Percentage of not a visible minority (White)
+
+```{r}
+census_data$PCT_white <- census_data$`v_CA21_4914: Not a visible minority`/census_data$`v_CA21_4872: Total - Visible minority for the population in private households`*100
+#mapview(census_data, zcol = "PCT_white")
+```
+
+- Percentage of Chinese
+
+```{r}
+census_data$PCT_chinese <- census_data$`v_CA21_4881: Chinese`/census_data$`v_CA21_4872: Total - Visible minority for the population in private households`*100
+#mapview(census_data, zcol = "PCT_chinese")
+```
+
+- Percentage of Black
+
+```{r}
+census_data$PCT_black <- census_data$`v_CA21_4884: Black`/census_data$`v_CA21_4872: Total - Visible minority for the population in private households`*100
+#mapview(census_data, zcol = "PCT_black")
+```
+
+- Percentage of Latin American
+
+```{r}
+census_data$PCT_latino <- census_data$`v_CA21_4893: Latin American`/census_data$`v_CA21_4872: Total - Visible minority for the population in private households`*100
+#mapview(census_data, zcol = "PCT_latino")
+```
+
+- Percentage of rest of residents based on ethnicity
+
+```{r}
+census_data$PCT_rest_ethnicity <- 100 - census_data$PCT_white - 
+  census_data$PCT_chinese - census_data$PCT_black -
+  census_data$PCT_latino
+#mapview(census_data, zcol = "PCT_rest_ethnicity")
+```
+
+- Percentage of people's household total income below 40k
+
+```{r}
+census_data$PCT_income_blw40k <- (census_data$`v_CA21_924: Under $5,000` +
+                                    census_data$`v_CA21_925: $5,000 to $9,999` +
+                                    census_data$`v_CA21_926: $10,000 to $14,999` +
+                                    census_data$`v_CA21_927: $15,000 to $19,999` +
+                                    census_data$`v_CA21_928: $20,000 to $24,999` +
+                                    census_data$`v_CA21_929: $25,000 to $29,999` +
+                                    census_data$`v_CA21_930: $30,000 to $34,999` +
+                                    census_data$`v_CA21_931: $35,000 to $39,999`)/census_data$`v_CA21_923: Number of after-tax income recipients aged 15 years and over in private households in 2019`*100
+#mapview(census_data, zcol = "PCT_income_blw40k")
+```
+
+- Percentage of people's household total income above 100k
+
+```{r}
+census_data$PCT_income_abv100k <- census_data$`v_CA21_939: $100,000 and over`/census_data$`v_CA21_923: Number of after-tax income recipients aged 15 years and over in private households in 2019`*100
+#mapview(census_data, zcol = "PCT_income_abv100k")
+```
+
+- Percentage of rest of residents based on income
+
+```{r}
+census_data$PCT_rest_income <- 100 - census_data$PCT_income_blw40k -
+  census_data$PCT_income_abv100k
+#mapview(census_data, zcol = "PCT_rest_income")
+```
+
+```{r}
+# aggregate theft counts to each census tract and combination of month and 
+# day of week
+theft_merged <- st_join(theft,
+                       census_data,
+                       join = st_intersects)
+
+theft_merged |> st_drop_geometry() |> group_by(
+  OCC_MONTH, OCC_DOW, GeoUID
+) |> count() -> occurances
+```
+
+```{r}
+df <- census_data[rep(seq_len(nrow(census_data)), each = 12*7), ]
+
+df$weekday <- rep(c("Friday",
+                    "Monday",
+                    "Saturday",
+                    "Sunday",
+                    "Thursday",
+                    "Tuesday",
+                    "Wednesday"),
+                  length.out = nrow(df))
+
+df$month <- rep(rep(c("April",
+                      "August",
+                      "December",
+                      "February",
+                      "January",
+                      "July",
+                      "June",
+                      "March",
+                      "May",
+                      "November",
+                      "October",
+                      "September"),
+                    each = 7), length.out = nrow(df))
+```
+
+```{r}
+df <- merge(df,
+            occurances,
+            by.x = c("weekday", "month", "GeoUID"),
+            by.y = c("OCC_DOW", "OCC_MONTH", "GeoUID"),
+            all.x = T)
+
+# all missing data are 0 occurance of bike theft
+df[is.na(df$n),]$n <- 0
+```
+
+# Store the dataset
+
+```{r}
+st_write(df, "./Data/full_dataset.gpkg", append = F)
+
+df |> st_drop_geometry() |>
+  write.csv("./Data/full_dataset.csv")
+```

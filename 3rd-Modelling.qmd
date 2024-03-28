@@ -1,0 +1,488 @@
+---
+title: "Modelling"
+author: "Zehui Yin"
+format: html
+---
+
+```{r load package}
+#| message: false
+library(tidyverse)
+library(fixest)
+library(marginaleffects)
+library(DHARMa)
+library(patchwork)
+library(pscl)
+```
+
+```{r}
+df <- read.csv("./Data/full_dataset.csv")
+```
+
+```{r}
+# histogram of the response variable
+hist(df$n)
+```
+
+# Some recoding and transformation
+
+```{r}
+df$distance_class <- case_when(
+  df$distance_m_to_nearest_station <= 500 ~ "<500m",
+  df$distance_m_to_nearest_station > 500 & df$distance_m_to_nearest_station <= 1000 ~ "500-1000m",
+  df$distance_m_to_nearest_station > 1000 & df$distance_m_to_nearest_station <= 2000 ~ "1000-2000m",
+  df$distance_m_to_nearest_station > 2000 ~ ">2000m"
+)
+
+df$distance_m_to_nearest_station_sqaure <- df$distance_m_to_nearest_station^2
+
+df$log_distance_m_to_nearest_station <- log(df$distance_m_to_nearest_station)
+
+df$log_distance_m_to_nearest_station_sqaure <- 
+  log(df$distance_m_to_nearest_station)^2
+
+df$pop_den <- df$v_CA21_6..Population.density.per.square.kilometre
+
+df$log_pop_den <- log(df$pop_den)
+```
+
+# Modelling
+
+## Squared term
+
+```{r}
+lm(n ~ log_distance_m_to_nearest_station +
+     log_distance_m_to_nearest_station_sqaure,
+   data = df) |> summary()
+```
+
+```{r}
+lm(n ~ log_distance_m_to_nearest_station +
+     log_distance_m_to_nearest_station_sqaure +
+     PCT_female +
+     PCT_white +
+     PCT_income_blw40k +
+     log_pop_den +
+     PCT_ageblw19 +
+     PCT_age20to24 +
+     DIV +
+     month + weekday, data = df) -> m_lm_square
+
+summary(m_lm_square)
+```
+
+```{r}
+# diagnostic plots
+plot(m_lm_square)
+```
+
+```{r}
+glm(n ~ log_distance_m_to_nearest_station +
+     log_distance_m_to_nearest_station_sqaure +
+     PCT_female +
+     PCT_white +
+     PCT_income_blw40k +
+     log_pop_den +
+     PCT_ageblw19 +
+     PCT_age20to24 +
+     DIV +
+     month + weekday, data = df,
+    family = "poisson") -> m_glm_square
+
+summary(m_glm_square)
+BIC(m_glm_square)
+```
+
+```{r}
+# deviance residual plot
+plot(resid(m_glm_square, type = "deviance")~m_glm_square$fitted.values)
+```
+
+```{r}
+# a lot of overdispersion
+simulationOutput <- simulateResiduals(fittedModel = m_glm_square, refit = F)
+testDispersion(simulationOutput)
+```
+
+```{r}
+femlm(n ~ log_distance_m_to_nearest_station +
+          log_distance_m_to_nearest_station_sqaure +
+              PCT_female +
+              PCT_white +
+              PCT_income_blw40k +
+              PCT_ageblw19 +
+              PCT_age20to24 +
+              log_pop_den +
+              DIV | month + weekday, 
+            data = df, family = "negbin",
+      vcov = "twoway") -> m_fe_square
+
+summary(m_fe_square)
+```
+
+```{r}
+# reduced model
+femlm(n ~ log_distance_m_to_nearest_station +
+          log_distance_m_to_nearest_station_sqaure,
+            data = df, family = "negbin",
+      vcov = "iid") |> summary()
+```
+
+
+```{r}
+# deviance residual plot
+plot(resid(m_fe_square, type = "deviance")~m_fe_square$fitted.values)
+```
+
+### Marginal effect plot
+
+```{r}
+# get the range of distance from the sample
+summary(df$distance_m_to_nearest_station)
+```
+
+```{r}
+new <- datagrid(model = m_fe_square, 
+                log_distance_m_to_nearest_station = log(seq(150, 8867, 1)))
+new$log_distance_m_to_nearest_station_sqaure <- 
+  new$log_distance_m_to_nearest_station^2
+
+predict(m_fe_square, newdata = new, type = "response") -> predicted_response_fe
+predict(m_glm_square, newdata = new, type = "response") -> predicted_response_glm
+predict(m_lm_square, newdata = new) -> predicted_response_lm
+
+plot_data <- cbind(predicted_response_fe, 
+                   predicted_response_glm,
+                   predicted_response_lm,
+                   seq(150, 8867, 1)) |> as.data.frame()
+
+colnames(plot_data) <- c("fe", "glm", "lm", "distance")
+
+plot_data |> pivot_longer(c(fe, glm, lm), names_to = "model", values_to = "response") -> plot_data
+```
+
+```{r}
+ggplot(data = plot_data,
+       aes(x = distance, y = response, color = model)) + geom_line() +
+  labs(x = "Network Distance to the Nearest Police Facility in Metres", 
+       y = "Mean of Bike Theft Counts") +
+  scale_y_continuous(limit = c(0.4, 1.6)) +
+  scale_color_manual(name = "Regression:",
+                     values = c(
+                       "fe" = "#7fc97f",
+                       "glm" = "#beaed4",
+                       "lm" = "#fdc086"
+                     ),
+                     labels = c(
+                       "fe" = "Negative Binomial",
+                       "glm" = "Poisson",
+                       "lm" = "Multiple Linear"
+                     )) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.85, 0.8),
+        legend.background = element_blank()) -> square_response
+
+square_response
+ggsave("./Graphs/square_response.png", dpi = 600)
+```
+
+### Best model with SE
+
+```{r}
+cbind(predictions(model = m_fe_square, newdata = new)) |>
+  mutate(distance_m_to_nearest_station = seq(150, 8867, 1)) |>
+  ggplot(aes(x = distance_m_to_nearest_station, 
+             y = estimate, ymin = conf.low, ymax = conf.high)) + 
+  geom_line() +
+  geom_ribbon(alpha = 0.3) +
+  labs(x = "Network Distance to the Nearest Police Facility in Metres", 
+       y = "Mean of Bike Theft Counts") +
+  scale_y_continuous(limit = c(-0.2, 1.9)) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.85, 0.8),
+        legend.background = element_blank())
+
+ggsave("./Graphs/square_response_fe_with_se.png", dpi = 600)
+```
+
+## Dummy variable interactions
+
+```{r}
+lm(n ~ distance_class*distance_m_to_nearest_station +
+     PCT_female +
+     PCT_white +
+     PCT_income_blw40k +
+     log_pop_den +
+     PCT_ageblw19 +
+     PCT_age20to24 +
+     DIV +
+     month + weekday, data = df) -> m_lm_dummy
+
+summary(m_lm_dummy)
+```
+
+```{r}
+# diagnostic plots
+plot(m_lm_dummy)
+```
+
+```{r}
+glm(n ~ distance_class*distance_m_to_nearest_station +
+     PCT_female +
+     PCT_white +
+     PCT_income_blw40k +
+     log_pop_den +
+     PCT_ageblw19 +
+     PCT_age20to24 +
+     DIV +
+     month + weekday, data = df,
+    family = "poisson") -> m_glm_dummy
+
+summary(m_glm_dummy)
+BIC(m_glm_dummy)
+```
+
+```{r}
+# deviance residual plot
+plot(resid(m_glm_dummy, type = "deviance")~m_glm_dummy$fitted.values)
+```
+
+```{r}
+# a lot of overdispersion
+simulationOutput <- simulateResiduals(fittedModel = m_glm_dummy, refit = F)
+testDispersion(simulationOutput)
+```
+
+```{r}
+femlm(n ~ distance_class*distance_m_to_nearest_station +
+              PCT_female +
+              PCT_white +
+              PCT_income_blw40k +
+              PCT_ageblw19 +
+              PCT_age20to24 +
+              log_pop_den +
+              DIV | month + weekday, 
+            data = df, family = "negbin",
+      vcov = "twoway") -> m_fe_dummy
+
+summary(m_fe_dummy)
+```
+
+```{r}
+# reduced model
+femlm(n ~ distance_class*distance_m_to_nearest_station,
+            data = df, family = "negbin",
+      vcov = "iid") |> summary()
+```
+
+```{r}
+# deviance residual plot
+plot(resid(m_fe_dummy, type = "deviance")~m_fe_dummy$fitted.values)
+```
+
+```{r}
+# generate high quality deviance residual plot for the final model
+plot_data <- cbind(resid(m_fe_dummy, type = "deviance"), 
+                   m_fe_dummy$fitted.values) |> as.data.frame()
+colnames(plot_data) <- c("resid", "fitted")
+
+ggplot(data = plot_data,
+       aes(x = fitted, y = resid)) + geom_point() +
+  geom_hline(yintercept = 0, color = "#dd1c77") +
+  geom_smooth(method = "loess", span = 0.05, linewidth = 1,
+              formula = y ~ x) +
+  labs(x = "Fitted Value", 
+       y = "Deviance Residual") +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.85, 0.8),
+        legend.background = element_blank()) -> dummy_response_resid
+
+dummy_response_resid
+ggsave("./Graphs/dummy_response_resid.png", dpi = 600)
+```
+
+### Marginal effect plot
+
+```{r}
+# get the range of distance from the sample
+summary(df$distance_m_to_nearest_station)
+```
+
+```{r}
+new <- datagrid(model = m_fe_dummy, 
+                distance_m_to_nearest_station = seq(150, 8867, 1))
+
+new$distance_class <- case_when(
+  new$distance_m_to_nearest_station <= 500 ~ "<500m",
+  new$distance_m_to_nearest_station > 500 & new$distance_m_to_nearest_station <= 1000 ~ "500-1000m",
+  new$distance_m_to_nearest_station > 1000 & new$distance_m_to_nearest_station <= 2000 ~ "1000-2000m",
+  new$distance_m_to_nearest_station > 2000 ~ ">2000m"
+)
+
+predict(m_fe_dummy, newdata = new, type = "response") -> predicted_response_fe
+predict(m_glm_dummy, newdata = new, type = "response") -> predicted_response_glm
+predict(m_lm_dummy, newdata = new) -> predicted_response_lm
+
+plot_data <- cbind(predicted_response_fe, 
+                   predicted_response_glm,
+                   predicted_response_lm,
+                   seq(150, 8867, 1)) |> as.data.frame()
+
+colnames(plot_data) <- c("fe", "glm", "lm", "distance")
+
+plot_data |> pivot_longer(c(fe, glm, lm), 
+                          names_to = "model", 
+                          values_to = "response") -> plot_data
+```
+
+```{r}
+ggplot(data = plot_data,
+       aes(x = distance, y = response, color = model)) + geom_line() +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "white") +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "grey50",
+             linetype = "dashed") +
+  labs(x = "Network Distance to the Nearest Police Facility in Metres", 
+       y = "Mean of Bike Theft Counts") +
+  scale_y_continuous(limit = c(0.2, 1.95)) +
+  scale_x_continuous(breaks = c(0, 500, 1000, 2000, 2500, 5000, 7500)) +
+  scale_color_manual(name = "Regression:",
+                     values = c(
+                       "fe" = "#7fc97f",
+                       "glm" = "#beaed4",
+                       "lm" = "#fdc086"
+                     ),
+                     labels = c(
+                       "fe" = "Negative Binomial",
+                       "glm" = "Poisson",
+                       "lm" = "Multiple Linear"
+                     )) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.85, 0.8),
+        legend.background = element_blank()) -> dummy_response
+
+dummy_response
+ggsave("./Graphs/dummy_response.png", dpi = 600)
+```
+
+### Best model with SE
+
+```{r}
+cbind(predictions(model = m_fe_dummy, newdata = new)) |>
+  ggplot(aes(x = distance_m_to_nearest_station, 
+             y = estimate, ymin = conf.low, ymax = conf.high)) + 
+  geom_line() +
+  geom_ribbon(alpha = 0.3) +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "white") +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "grey50",
+             linetype = "dashed") +
+  labs(x = "Network Distance to the Nearest Police Facility in Metres", 
+       y = "Mean of Bike Theft Counts") +
+  scale_y_continuous(limit = c(0.2, 1.5)) +
+  scale_x_continuous(breaks = c(0, 500, 1000, 2000, 2500, 5000, 7500)) +
+  scale_color_manual(name = "Regression:",
+                     values = c(
+                       "fe" = "#7fc97f",
+                       "glm" = "#beaed4",
+                       "lm" = "#fdc086"
+                     ),
+                     labels = c(
+                       "fe" = "Negative Binomial",
+                       "glm" = "Poisson",
+                       "lm" = "Multiple Linear"
+                     )) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.85, 0.8),
+        legend.background = element_blank()) -> dummy_response_fe_with_se
+
+dummy_response_fe_with_se
+ggsave("./Graphs/dummy_response_fe_with_se.png", dpi = 600)
+```
+
+# Merge plots together
+
+```{r}
+square_response + dummy_response
+ggsave("./Graphs/predicted_prob_all.png", dpi = 600, height = 7.29, width = 14.6)
+```
+
+```{r}
+dummy_response_fe_with_se + dummy_response_resid
+ggsave("./Graphs/best_model.png", dpi = 600, height = 7.29, width = 14.6)
+```
+
+# Zero-inflated Count Data Regression
+
+```{r}
+m_zi_dummy <- zeroinfl(n ~ distance_class*distance_m_to_nearest_station +
+                         DIV + month + weekday |
+                         PCT_female +
+                         PCT_white +
+                         PCT_income_blw40k +
+                         log_pop_den +
+                         PCT_ageblw19 +
+                         PCT_age20to24, 
+                       data = df, 
+                       dist = "negbin")
+
+summary(m_zi_dummy)
+```
+
+## Partial plots best non zero inflation with zero inflation model
+
+```{r}
+new <- datagrid(model = m_zi_dummy, 
+                distance_m_to_nearest_station = seq(150, 8867, 1))
+
+new$distance_class <- case_when(
+  new$distance_m_to_nearest_station <= 500 ~ "<500m",
+  new$distance_m_to_nearest_station > 500 & new$distance_m_to_nearest_station <= 1000 ~ "500-1000m",
+  new$distance_m_to_nearest_station > 1000 & new$distance_m_to_nearest_station <= 2000 ~ "1000-2000m",
+  new$distance_m_to_nearest_station > 2000 ~ ">2000m"
+)
+```
+
+```{r}
+plot_data <- cbind(estimate_zi = predict(m_zi_dummy, newdata = new, 
+                                      type = "response"), 
+                   estimate_non_zi = predict(m_fe_dummy, newdata = new, 
+                                      type = "response"), 
+                   new)
+
+pivot_longer(plot_data, starts_with("estimate"), 
+             names_to = "type", values_to = "estimate") |>
+  ggplot(aes(x = distance_m_to_nearest_station, 
+             y = estimate, color = type)) + 
+  geom_line() +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "white") +
+  geom_vline(xintercept = c(500, 1000, 2000), color = "grey50",
+             linetype = "dashed") +
+  labs(x = "Network Distance to the Nearest Police Facility in Metres", 
+       y = "Mean of Bike Theft Counts") +
+  scale_x_continuous(breaks = c(0, 500, 1000, 2000, 2500, 5000, 7500)) +
+  scale_color_manual(name = "Regression:",
+                     values = c(
+                       "estimate_non_zi" = "#7fc97f",
+                       "estimate_zi" = "#386cb0"
+                     ),
+                     labels = c(
+                       "estimate_non_zi" = "Negative Binomial",
+                       "estimate_zi" = "Zero Inflated Negative Binomial"
+                     )) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.key = element_blank(),
+        legend.position = c(0.9, 0.8),
+        legend.background = element_blank()) -> dummy_response_zi_partial
+
+dummy_response_zi_partial
+ggsave("./Graphs/best_model_zi.png", dpi = 600, height = 7.29, width = 14.6)
+```

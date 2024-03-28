@@ -1,0 +1,142 @@
+---
+title: "Descriptive Statistics"
+author: "Zehui Yin"
+format: html
+---
+
+```{r}
+library(tidyverse)
+library(summarytools)
+library(cancensus)
+library(sf)
+library(ggspatial)
+```
+
+# Descriptive Statistics
+
+```{r}
+df <- read.csv("./Data/full_dataset.csv")
+df$pop_den <- df$v_CA21_6..Population.density.per.square.kilometre
+```
+
+```{r, results='asis'}
+df |>
+  select(n,
+         distance_m_to_nearest_station,
+         DIV,
+         PCT_female,
+         PCT_white,
+         PCT_income_blw40k,
+         PCT_ageblw19,
+         PCT_age20to24,
+         pop_den) |>
+  dfSummary(
+    round.digits = 2,
+    plain.ascii  = FALSE, 
+    style        = "grid", 
+    graph.magnif = 0.75, 
+    valid.col    = FALSE,
+    tmp.img.dir  = "./tmp")
+```
+
+# Study Area Map
+
+```{r}
+options(cancensus.api_key = "your_api_key_here")
+options(cancensus.cache_path = "./Census")
+
+# Returns data and geography as an sf-class data frame
+census_data <- get_census(
+  # 2021 census
+  dataset='CA21',
+  # CSD Toronto
+  regions=list(CSD="3520005"),
+  # Census variables
+  vectors=c(
+    # age and population density
+    "v_CA21_6","v_CA21_11","v_CA21_71","v_CA21_89",
+    # gender
+    "v_CA21_10","v_CA21_8",
+    # population count
+    "v_CA21_1",
+    # Indigenous identity (Total)
+    "v_CA21_4204",
+    # Total - Indigenous identity for the population in private households (Total)
+    "v_CA21_4201",
+    # Not a visible minority (Total)
+    "v_CA21_4914",
+    # Total - Visible minority for the population in private households (Total)
+    "v_CA21_4872",
+    # Chinese (Total)
+    "v_CA21_4881",
+    # Black (Total)
+    "v_CA21_4884",
+    # Latin American (Total)
+    "v_CA21_4893",
+    # Under $5,000; $5,000 to $9,999; $10,000 to $14,999; $15,000 to $19,999 ;
+    # $20,000 to $24,999; $25,000 to $29,999; $30,000 to $34,999; $35,000 to $39,999
+    "v_CA21_924","v_CA21_925","v_CA21_926","v_CA21_927","v_CA21_928","v_CA21_929","v_CA21_930","v_CA21_931",
+    # $100,000 and over
+    # Household total income groups in 2020 for private households
+    "v_CA21_939","v_CA21_923"
+  ),
+  # at Census Tract level
+  level='CT',
+  geo_format = 'sf', quiet = TRUE)
+
+station <- st_read("./Data/Police Facility Locations - 4326.gpkg")
+
+theft <- st_read("./Data/bicycle-thefts - 4326.gpkg")
+theft <- theft |>
+  filter(OCC_YEAR >= 2014)
+
+theft <- theft[st_intersects(theft,
+              st_union(census_data),
+              sparse = F),]
+```
+
+```{r}
+ggplot() +
+  annotation_map_tile(type = "cartodark",
+                      zoomin = 0,
+                      cachedir = "./rosm.cache") +
+  geom_sf(data = theft, aes(color = "Bike Theft", 
+                            size = "Bike Theft")) +
+  geom_sf(data = census_data, color = "white", fill = NA) +
+  geom_sf(data = station, aes(color = "Police Facility", 
+                              size = "Police Facility")) +
+  scale_color_manual(name = "",
+                     values = c("Bike Theft" = "grey50",
+                                "Police Facility" = "#3182bd")) +
+  scale_size_manual(name = "",
+                     values = c("Bike Theft" = 0.5,
+                                "Police Facility" = 3)) +
+  labs(x = "", y = "") +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.key = element_rect(fill = "black", color = "white"),
+        legend.position = c(0.85, 0.1),
+        legend.background = element_blank(),
+        legend.text = element_text(color = "white"),
+        legend.margin=margin(t = -0.5, unit='cm')) +
+  annotation_scale(text_col="white",
+                   line_col="white",
+                   pad_x = unit(0.4, "native"),
+                   pad_y = unit(0.04, "native")) +
+  annotation_north_arrow(height = unit(0.1, "native"),
+                         width = unit(0.1, "native"),
+                         pad_x = unit(0.875, "native"),
+                         pad_y = unit(0.3, "native"),
+                         style = north_arrow_fancy_orienteering(
+                                   line_width = 1,
+                                   line_col = "white",
+                                   fill = c("white", "black"),
+                                   text_col = "white",
+                                   text_family = "",
+                                   text_face = NULL,
+                                   text_size = 7,
+                                   text_angle = 0
+                        ))
+
+ggsave("./Graphs/study_area.png", dpi = 600)
+```

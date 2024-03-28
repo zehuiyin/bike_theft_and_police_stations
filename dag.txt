@@ -1,0 +1,42 @@
+https://www.dagitty.net/dags.html#
+dag {
+bb="-4.488,-7.745,5.006,7.856"
+"Bike Theft" [outcome,pos="0.449,-0.402"]
+"Census Tract Geographical Location" [pos="-0.751,2.004"]
+"Census Tract Size" [pos="1.589,3.157"]
+"Police Division" [adjusted,pos="0.055,-4.537"]
+"Population Count" [pos="2.469,0.814"]
+"Population Density" [adjusted,pos="1.883,-3.121"]
+"Spatial Dependent Variables" [latent,pos="-0.522,3.859"]
+"Time Shock" [latent,pos="-1.191,-4.512"]
+Age [adjusted,pos="0.957,1.854"]
+Distance [exposure,pos="-1.703,-1.354"]
+Gender [adjusted,pos="-2.171,-3.911"]
+Race [adjusted,pos="-2.161,1.791"]
+Time [adjusted,pos="-1.158,-3.397"]
+"Census Tract Geographical Location" -> "Census Tract Size"
+"Census Tract Geographical Location" -> Age
+"Census Tract Geographical Location" -> Distance
+"Census Tract Geographical Location" -> Race
+"Census Tract Size" -> "Population Count"
+"Census Tract Size" -> "Population Density"
+"Police Division" -> "Bike Theft"
+"Police Division" -> "Population Density"
+"Police Division" -> Distance
+"Population Count" -> "Population Density"
+"Population Density" -> "Bike Theft"
+"Population Density" -> Age
+"Population Density" -> Distance
+"Population Density" -> Race
+"Spatial Dependent Variables" -> "Census Tract Geographical Location"
+"Time Shock" -> Time
+Age -> "Bike Theft"
+Age -> Distance
+Distance -> "Bike Theft"
+Gender -> "Bike Theft"
+Gender -> Distance
+Race -> "Bike Theft"
+Race -> Distance
+Time -> "Bike Theft"
+Time -> Distance
+}
