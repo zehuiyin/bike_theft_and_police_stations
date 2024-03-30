@@ -1,0 +1,1 @@
+This folder is a cache for the cancensus package.
